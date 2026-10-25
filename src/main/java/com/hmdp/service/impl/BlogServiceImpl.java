@@ -8,27 +8,24 @@ import com.hmdp.dto.Result;
 import com.hmdp.dto.ScrollResult;
 import com.hmdp.dto.UserDTO;
 import com.hmdp.entity.Blog;
-import com.hmdp.entity.Follow;
 import com.hmdp.entity.User;
 import com.hmdp.mapper.BlogMapper;
 import com.hmdp.service.IBlogService;
-import com.hmdp.service.IFollowService;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.SystemConstants;
 import com.hmdp.utils.UserHolder;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static com.hmdp.utils.RedisConstants.BLOG_LIKED_KEY;
-import static com.hmdp.utils.RedisConstants.FEED_KEY;
 
 /**
  * <p>
@@ -47,8 +44,8 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
-    @Resource
-    private IFollowService followService;
+    @Resource private com.hmdp.service.consistency.LikeConsistencyService likes;
+    @Resource private com.hmdp.service.consistency.HybridFeedService feed;
 
     @Override
     public Result queryHotBlog(Integer current) {
@@ -58,11 +55,8 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
                 .page(new Page<>(current, SystemConstants.MAX_PAGE_SIZE));
         // 获取当前页数据
         List<Blog> records = page.getRecords();
-        // 查询用户
-        records.forEach(blog -> {
-            this.queryBlogUser(blog);
-            this.isBlogLiked(blog);
-        });
+        // 批量查询作者和点赞状态
+        fillAuthorAndLiked(records);
         return Result.ok(records);
     }
 
@@ -73,52 +67,46 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         if (blog == null) {
             return Result.fail("笔记不存在！");
         }
-        // 2.查询blog有关的用户
-        queryBlogUser(blog);
-        // 3.查询blog是否被点赞
-        isBlogLiked(blog);
+        // 2.查询blog有关的用户、是否被点赞
+        fillAuthorAndLiked(Collections.singletonList(blog));
         return Result.ok(blog);
     }
 
-    private void isBlogLiked(Blog blog) {
-        // 1.获取登录用户
-        UserDTO user = UserHolder.getUser();
-        if (user == null) {
-            // 用户未登录，无需查询是否点赞
+    /**
+     * 批量填充作者信息和当前用户的点赞状态，避免 N+1：
+     * 作者批量查库，点赞计数与当前用户状态通过一次 Redis pipeline 读取；
+     * 现在用户一次 IN 查询，点赞状态用 pipeline 一次发出。
+     */
+    private void fillAuthorAndLiked(List<Blog> blogs) {
+        if (blogs.isEmpty()) {
             return;
         }
-        Long userId = user.getId();
-        // 2.判断当前登录用户是否已经点赞
-        String key = "blog:liked:" + blog.getId();
-        Double score = stringRedisTemplate.opsForZSet().score(key, userId.toString());
-        blog.setIsLike(score != null);
+        // 1.作者：一次 IN 查询。作者账号不存在时跳过，不再空指针
+        Set<Long> userIds = blogs.stream().map(Blog::getUserId).collect(Collectors.toSet());
+        Map<Long, User> users = userService.listByIds(userIds).stream()
+                .collect(Collectors.toMap(User::getId, Function.identity()));
+        for (Blog blog : blogs) {
+            User user = users.get(blog.getUserId());
+            if (user != null) {
+                blog.setName(user.getNickName());
+                blog.setIcon(user.getIcon());
+            }
+        }
+        UserDTO current = UserHolder.getUser();
+        Map<Long,long[]> likeStates = likes.readMany(false,blogs.stream().map(Blog::getId).collect(Collectors.toList()),
+                current == null ? null : current.getId());
+        for (Blog blog : blogs) {
+            long[] state = likeStates.get(blog.getId());
+            if (state != null) {
+                if (state[0] >= 0) blog.setLiked((int)state[0]);
+                blog.setIsLike(state[1] == 1);
+            }
+        }
     }
 
     @Override
-    public Result likeBlog(Long id) {
-        // 1.获取登录用户
-        Long userId = UserHolder.getUser().getId();
-        // 2.判断当前登录用户是否已经点赞
-        String key = BLOG_LIKED_KEY + id;
-        Double score = stringRedisTemplate.opsForZSet().score(key, userId.toString());
-        if (score == null) {
-            // 3.如果未点赞，可以点赞
-            // 3.1.数据库点赞数 + 1
-            boolean isSuccess = update().setSql("liked = liked + 1").eq("id", id).update();
-            // 3.2.保存用户到Redis的set集合  zadd key value score
-            if (isSuccess) {
-                stringRedisTemplate.opsForZSet().add(key, userId.toString(), System.currentTimeMillis());
-            }
-        } else {
-            // 4.如果已点赞，取消点赞
-            // 4.1.数据库点赞数 -1
-            boolean isSuccess = update().setSql("liked = liked - 1").eq("id", id).update();
-            // 4.2.把用户从Redis的set集合移除
-            if (isSuccess) {
-                stringRedisTemplate.opsForZSet().remove(key, userId.toString());
-            }
-        }
-        return Result.ok();
+    public Result likeBlog(Long id, Boolean liked) {
+        return likes.setLiked(false,id,UserHolder.getUser().getId(),liked);
     }
 
     @Override
@@ -143,82 +131,39 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     }
 
     @Override
+    @org.springframework.transaction.annotation.Transactional
     public Result saveBlog(Blog blog) {
-        // 1.获取登录用户
-        UserDTO user = UserHolder.getUser();
-        blog.setUserId(user.getId());
-        // 2.保存探店笔记
-        boolean isSuccess = save(blog);
-        if(!isSuccess){
-            return Result.fail("新增笔记失败!");
-        }
-        // 3.查询笔记作者的所有粉丝 select * from tb_follow where follow_user_id = ?
-        List<Follow> follows = followService.query().eq("follow_user_id", user.getId()).list();
-        // 4.推送笔记id给所有粉丝
-        for (Follow follow : follows) {
-            // 4.1.获取粉丝id
-            Long userId = follow.getUserId();
-            // 4.2.推送
-            String key = FEED_KEY + userId;
-            stringRedisTemplate.opsForZSet().add(key, blog.getId().toString(), System.currentTimeMillis());
-        }
-        // 5.返回id
+        if (blog.getShopId() == null || StrUtil.isBlank(blog.getTitle()) || StrUtil.isBlank(blog.getContent()))
+            return Result.fail("店铺、标题和内容不能为空");
+        blog.setId(null);
+        blog.setUserId(UserHolder.getUser().getId());
+        blog.setLiked(0);
+        blog.setComments(0);
+        blog.setCreateTime(java.time.LocalDateTime.now().withNano(0));
+        blog.setUpdateTime(blog.getCreateTime());
+        if (!save(blog)) return Result.fail("新增笔记失败");
+        feed.register(blog);
         return Result.ok(blog.getId());
     }
 
     @Override
-    public Result queryBlogOfFollow(Long max, Integer offset) {
-        // 1.获取当前用户
-        Long userId = UserHolder.getUser().getId();
-        // 2.查询收件箱 ZREVRANGEBYSCORE key Max Min LIMIT offset count
-        String key = FEED_KEY + userId;
-        Set<ZSetOperations.TypedTuple<String>> typedTuples = stringRedisTemplate.opsForZSet()
-                .reverseRangeByScoreWithScores(key, 0, max, offset, 2);
-        // 3.非空判断
-        if (typedTuples == null || typedTuples.isEmpty()) {
-            return Result.ok();
+    @SuppressWarnings("unchecked")
+    public Result queryBlogOfFollow(String cursor) {
+        try {
+            ScrollResult result = feed.query(UserHolder.getUser().getId(),cursor);
+            fillAuthorAndLiked((List<Blog>)result.getList());
+            return Result.ok(result);
+        } catch (IllegalArgumentException e) {
+            return Result.fail("无效的分页游标");
         }
-        // 4.解析数据：blogId、minTime（时间戳）、offset
-        List<Long> ids = new ArrayList<>(typedTuples.size());
-        long minTime = 0; // 2
-        int os = 1; // 2
-        for (ZSetOperations.TypedTuple<String> tuple : typedTuples) { // 5 4 4 2 2
-            // 4.1.获取id
-            ids.add(Long.valueOf(tuple.getValue()));
-            // 4.2.获取分数(时间戳）
-            long time = tuple.getScore().longValue();
-            if(time == minTime){
-                os++;
-            }else{
-                minTime = time;
-                os = 1;
-            }
-        }
-
-        // 5.根据id查询blog
-        String idStr = StrUtil.join(",", ids);
-        List<Blog> blogs = query().in("id", ids).last("ORDER BY FIELD(id," + idStr + ")").list();
-
-        for (Blog blog : blogs) {
-            // 5.1.查询blog有关的用户
-            queryBlogUser(blog);
-            // 5.2.查询blog是否被点赞
-            isBlogLiked(blog);
-        }
-
-        // 6.封装并返回
-        ScrollResult r = new ScrollResult();
-        r.setList(blogs);
-        r.setOffset(os);
-        r.setMinTime(minTime);
-
-        return Result.ok(r);
     }
 
-    private void queryBlogUser(Blog blog) {
-        Long userId = blog.getUserId();
-        User user = userService.getById(userId);
-        blog.setName(user.getNickName());
-        blog.setIcon(user.getIcon());
+    @Override
+    public Result queryByAuthor(Long userId, Integer current) {
+        if (current == null || current < 1) return Result.fail("页码错误");
+        List<Blog> records = query().eq("user_id",userId).orderByDesc("create_time","id")
+                .page(new Page<>(current,SystemConstants.MAX_PAGE_SIZE)).getRecords();
+        fillAuthorAndLiked(records);
+        return Result.ok(records);
     }
 }

@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 
+import static com.hmdp.utils.RedisConstants.CACHE_NULL_TTL;
 import static com.hmdp.utils.RedisConstants.CACHE_VOUCHER_LIST_KEY;
 
 @Slf4j
@@ -80,6 +81,16 @@ public class VoucherListCacheService {
     }
 
 
+    /**
+     * 券数据变更后清理缓存，需在事务提交后调用。
+     * 先删 Redis 再删本地：反过来的话，本地删除后立即到来的请求会从 Redis 加载回旧数据。
+     * 多实例部署时，其他实例的本地缓存还需要广播失效（如 Redis Pub/Sub），目前依赖 5 秒刷新。
+     */
+    public void evict(Long shopId) {
+        stringRedisTemplate.delete(CACHE_VOUCHER_LIST_KEY + shopId);
+        voucherListCache.invalidate(shopId);
+    }
+
     // 本地缓存的load逻辑
     private List<Voucher> loadFromRedisThenDb(Long shopId) {
         String key = CACHE_VOUCHER_LIST_KEY + shopId;
@@ -93,11 +104,11 @@ public class VoucherListCacheService {
         // 2) Redis中不存在，读 MySQL
         List<Voucher> vouchers = loadFromDb(shopId);
 
-        if(CollectionUtil.isNotEmpty(vouchers)) {
-            // 3) MySQL中数据不为空才写回 Redis, 避免写入空数据
-            long ttlMillis = cacheProperties.getRedisTtl().toMillis();
-            stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(vouchers), ttlMillis, TimeUnit.MILLISECONDS);
-        }
+        // 3) 写回 Redis：有数据用正常 TTL；空列表也缓存（短 TTL），避免不存在的 shopId 反复打库
+        long ttlMillis = CollectionUtil.isEmpty(vouchers)
+                ? TimeUnit.MINUTES.toMillis(CACHE_NULL_TTL)
+                : cacheProperties.getRedisTtl().toMillis();
+        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(vouchers), ttlMillis, TimeUnit.MILLISECONDS);
 
         return vouchers;
     }

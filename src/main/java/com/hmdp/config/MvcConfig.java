@@ -21,13 +21,10 @@ public class MvcConfig implements WebMvcConfigurer {
 
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
-        // 登录拦截器
+        // 登录拦截器。/shop/**、/voucher/**、/shop-type/** 只有 GET 查询允许匿名访问，在 LoginInterceptor 中判断；
+        // 上传和删除图片需要登录
         registry.addInterceptor(new LoginInterceptor())
                 .excludePathPatterns(
-                        "/shop/**",
-                        "/voucher/**",
-                        "/shop-type/**",
-                        "/upload/**",
                         "/imgs/**",
                         "/blog/hot",
                         "/blog-comments/list",
@@ -49,6 +46,7 @@ public class MvcConfig implements WebMvcConfigurer {
         registry.addMapping("/**")
                 .allowedOrigins(
                         "http://localhost:5173", "http://127.0.0.1:5173",
+                        "http://localhost:5174", "http://127.0.0.1:5174",
                         "http://localhost:4173", "http://127.0.0.1:4173"
                 )
                 .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")

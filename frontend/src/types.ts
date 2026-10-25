@@ -64,8 +64,14 @@ export interface Blog {
 
 export interface ScrollResult<T> {
   list: T[]
-  minTime: number
-  offset: number
+  nextCursor?: string
+  hasMore: boolean
+}
+
+/** SUCCESS 已创建订单；PROCESSING 订单处理中；NONE 没有资格（没抢过，或下单失败资格已退回） */
+export interface SeckillResult {
+  status: 'SUCCESS' | 'PROCESSING' | 'NONE'
+  orderId?: string
 }
 
 export interface Voucher {

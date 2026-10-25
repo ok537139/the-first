@@ -1,7 +1,6 @@
 package com.hmdp.service.impl;
 
 import cn.hutool.core.util.StrUtil;
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.dto.Result;
@@ -15,7 +14,6 @@ import com.hmdp.service.IBlogService;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.SystemConstants;
 import com.hmdp.utils.UserHolder;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -24,7 +22,6 @@ import java.util.*;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
-import static com.hmdp.utils.RedisConstants.BLOG_COMMENT_LIKED_KEY;
 
 @Service
 public class BlogCommentsServiceImpl extends ServiceImpl<BlogCommentsMapper, BlogComments>
@@ -34,10 +31,14 @@ public class BlogCommentsServiceImpl extends ServiceImpl<BlogCommentsMapper, Blo
     private IBlogService blogService;
 
     @Resource
-    private IUserService userService;
+    private com.hmdp.service.consistency.LikeConsistencyService likes;
 
     @Resource
-    private StringRedisTemplate stringRedisTemplate;
+    private org.springframework.jdbc.core.JdbcTemplate jdbc;
+
+    @Resource
+    private IUserService userService;
+
 
     @Override
     public Result queryComments(Long blogId, Integer current) {
@@ -94,13 +95,13 @@ public class BlogCommentsServiceImpl extends ServiceImpl<BlogCommentsMapper, Blo
         Long parentId = comment.getParentId() == null ? 0L : comment.getParentId();
         Long answerId = comment.getAnswerId() == null ? 0L : comment.getAnswerId();
         if (parentId > 0) {
-            BlogComments parent = getById(parentId);
-            if (parent == null || !Objects.equals(parent.getBlogId(), comment.getBlogId()) || parent.getParentId() != 0) {
+            BlogComments parent = query().eq("id",parentId).last("FOR UPDATE").one();
+            if (parent == null || !Objects.equals(parent.getStatus(),0) || !Objects.equals(parent.getBlogId(), comment.getBlogId()) || parent.getParentId() != 0) {
                 return Result.fail("回复的一级评论不存在");
             }
             if (answerId > 0) {
                 BlogComments answer = getById(answerId);
-                if (answer == null || !Objects.equals(answer.getBlogId(), comment.getBlogId())
+                if (answer == null || !Objects.equals(answer.getStatus(),0) || !Objects.equals(answer.getBlogId(), comment.getBlogId())
                         || !(Objects.equals(answer.getId(), parentId) || Objects.equals(answer.getParentId(), parentId))) {
                     return Result.fail("被回复的评论不存在");
                 }
@@ -125,32 +126,14 @@ public class BlogCommentsServiceImpl extends ServiceImpl<BlogCommentsMapper, Blo
     }
 
     @Override
-    public Result likeComment(Long id) {
-        BlogComments comment = getById(id);
-        if (comment == null || !Objects.equals(comment.getStatus(), 0)) {
-            return Result.fail("评论不存在");
-        }
-        Long userId = UserHolder.getUser().getId();
-        String key = BLOG_COMMENT_LIKED_KEY + id;
-        Double score = stringRedisTemplate.opsForZSet().score(key, userId.toString());
-        if (score == null) {
-            boolean success = update().setSql("liked = IFNULL(liked, 0) + 1").eq("id", id).update();
-            if (success) {
-                stringRedisTemplate.opsForZSet().add(key, userId.toString(), System.currentTimeMillis());
-            }
-        } else {
-            boolean success = update().setSql("liked = GREATEST(IFNULL(liked, 0) - 1, 0)").eq("id", id).update();
-            if (success) {
-                stringRedisTemplate.opsForZSet().remove(key, userId.toString());
-            }
-        }
-        return Result.ok();
+    public Result likeComment(Long id, Boolean liked) {
+        return likes.setLiked(true,id,UserHolder.getUser().getId(),liked);
     }
 
     @Override
     @Transactional
     public Result deleteComment(Long id) {
-        BlogComments comment = getById(id);
+        BlogComments comment = query().eq("id",id).last("FOR UPDATE").one();
         if (comment == null || !Objects.equals(comment.getStatus(), 0)) {
             return Result.fail("评论不存在");
         }
@@ -158,8 +141,8 @@ public class BlogCommentsServiceImpl extends ServiceImpl<BlogCommentsMapper, Blo
             return Result.fail("只能删除自己的评论");
         }
 
-        List<BlogComments> removed = query().eq("id", id).or().eq("parent_id", id).list();
-        boolean success = remove(new QueryWrapper<BlogComments>().eq("id", id).or().eq("parent_id", id));
+        List<BlogComments> removed = query().eq("status",0).and(q -> q.eq("id",id).or().eq("parent_id",id)).last("FOR UPDATE").list();
+        boolean success = jdbc.update("UPDATE tb_blog_comments SET status=3,like_cleanup_pending=1 WHERE status=0 AND (id=? OR parent_id=?)",id,id)>0;
         if (!success) {
             return Result.fail("删除评论失败");
         }
@@ -167,7 +150,7 @@ public class BlogCommentsServiceImpl extends ServiceImpl<BlogCommentsMapper, Blo
                 .setSql("comments = GREATEST(IFNULL(comments, 0) - " + removed.size() + ", 0)")
                 .eq("id", comment.getBlogId())
                 .update();
-        removed.forEach(item -> stringRedisTemplate.delete(BLOG_COMMENT_LIKED_KEY + item.getId()));
+        // Soft deletion retains a durable Redis-cleanup task on the existing row.
         return Result.ok();
     }
 
@@ -178,8 +161,11 @@ public class BlogCommentsServiceImpl extends ServiceImpl<BlogCommentsMapper, Blo
         Map<Long, BlogComments> commentMap = comments.stream()
                 .collect(Collectors.toMap(BlogComments::getId, Function.identity()));
         UserDTO currentUser = UserHolder.getUser();
+        Map<Long,long[]> likeStates = likes.readMany(true,comments.stream().map(BlogComments::getId).collect(Collectors.toList()),
+                currentUser == null ? null : currentUser.getId());
 
-        for (BlogComments comment : comments) {
+        for (int i = 0; i < comments.size(); i++) {
+            BlogComments comment = comments.get(i);
             User user = userMap.get(comment.getUserId());
             if (user != null) {
                 comment.setUserName(user.getNickName());
@@ -190,13 +176,12 @@ public class BlogCommentsServiceImpl extends ServiceImpl<BlogCommentsMapper, Blo
                 User answerUser = answer == null ? null : userMap.get(answer.getUserId());
                 comment.setAnswerName(answerUser == null ? null : answerUser.getNickName());
             }
-            if (currentUser != null) {
-                Double score = stringRedisTemplate.opsForZSet().score(
-                        BLOG_COMMENT_LIKED_KEY + comment.getId(), currentUser.getId().toString());
-                comment.setIsLike(score != null);
-            } else {
-                comment.setIsLike(false);
+            long[] state = likeStates.get(comment.getId());
+            if (state != null) {
+                if (state[0] >= 0) comment.setLiked((int)state[0]);
+                comment.setIsLike(state[1] == 1);
             }
         }
     }
+
 }

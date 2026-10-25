@@ -43,10 +43,8 @@ public class ShopController {
      */
     @PostMapping
     public Result saveShop(@RequestBody Shop shop) {
-        // 写入数据库
-        shopService.save(shop);
-        // 返回店铺id
-        return Result.ok(shop.getId());
+        // 写入数据库，并加入店铺布隆过滤器
+        return shopService.saveShop(shop);
     }
 
     /**
@@ -63,18 +61,19 @@ public class ShopController {
     /**
      * 【滑动窗口限流】-4
      * 根据商铺类型分页查询商铺信息
-     * 举例测试滑动窗口限流，这里设置的参数的意思是 在window=5秒窗口时间内，限制访问次数是limit=5次，若5秒内超过5次则会限流(即限制访问)
+     * 举例测试滑动窗口限流，这里设置的参数的意思是 同一个IP 在window=5秒窗口时间内，限制访问次数是limit=10次，若5秒内超过10次则会限流(即限制访问)
+     * 按IP限流：METHOD 维度是全站共用一个计数器，首页每次切换分类、翻页都会调这个接口，几个人同时用就全被拦住
      * 测试：  http://localhost:8081/shop/of/type?typeId=1
      * @param typeId 商铺类型
      * @param current 页码
      * @return 商铺列表
      */
     @RateLimiter(
-            key = "coupon:seckill:",
+            key = "rate_limit:shop:",
             window = 5,
-            limit = 5,
+            limit = 10,
             message = "查询次数过多，请稍后再试",
-            type = RateLimiter.LimitType.METHOD
+            type = RateLimiter.LimitType.IP
     )
     @GetMapping("/of/type")
     public Result queryShopByType(

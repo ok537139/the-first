@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronLeft, ChevronRight, Clock3, LocateFixed, MapPin, Search, ShoppingBag, Star, Store, TicketPercent } from 'lucide-react'
 import { adminApi, discoveryApi, firstImage } from '../api'
 import { Modal } from '../components/Modal'
-import type { Shop } from '../types'
+import type { SeckillResult, Shop } from '../types'
 
 export function DiscoverPage() {
   const [typeId, setTypeId] = useState(1)
@@ -22,8 +22,17 @@ export function DiscoverPage() {
   const vouchers = useQuery({ queryKey: ['vouchers', selectedId], queryFn: () => discoveryApi.vouchers(selectedId!), enabled: Boolean(selectedId) })
   const activeType = useMemo(() => types.data?.find((item) => item.id === typeId), [types.data, typeId])
   const seckill = useMutation({
-    mutationFn: adminApi.seckill,
-    onSuccess: (orderId) => { setNotice(`抢购成功，订单号 ${orderId}`); void queryClient.invalidateQueries({ queryKey: ['vouchers', selectedId] }) },
+    mutationFn: async (voucherId: number) => {
+      // 下单接口只代表抢到资格，订单由后端异步创建，轮询几次拿到最终结果
+      await adminApi.seckill(voucherId)
+      for (let attempt = 0; attempt < 10; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        const result = await adminApi.seckillResult(voucherId)
+        if (result.status !== 'PROCESSING') return result
+      }
+      return { status: 'PROCESSING' } as SeckillResult
+    },
+    onSuccess: (result) => { setNotice(seckillMessage(result)); void queryClient.invalidateQueries({ queryKey: ['vouchers', selectedId] }) },
     onError: (error) => setNotice(error.message),
   })
 
@@ -78,6 +87,12 @@ export function DiscoverPage() {
       </div>
     </Modal>}
   </>
+}
+
+function seckillMessage(result: SeckillResult) {
+  if (result.status === 'SUCCESS') return `抢购成功，订单号 ${result.orderId}`
+  if (result.status === 'PROCESSING') return '已抢到资格，订单还在处理中，请稍后再查看'
+  return '下单失败，资格已退回，可以重新抢购'
 }
 
 function ShopCard({ shop, typeName, onOpen }: { shop: Shop; typeName?: string; onOpen: () => void }) {

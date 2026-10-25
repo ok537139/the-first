@@ -17,7 +17,7 @@ public interface IBlogCommentsService extends IService<BlogComments> {
 
     Result saveComment(BlogComments comment);
 
-    Result likeComment(Long id);
+    Result likeComment(Long id, Boolean liked);
 
     Result deleteComment(Long id);
 }

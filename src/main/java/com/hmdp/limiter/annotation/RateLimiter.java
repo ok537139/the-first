@@ -12,6 +12,7 @@ import java.lang.annotation.*;
 @Target(ElementType.METHOD)
 @Retention(RetentionPolicy.RUNTIME)
 @Documented
+@Repeatable(RateLimiters.class)
 public @interface RateLimiter {
     /**
      * 限流key前缀
@@ -44,7 +45,7 @@ public @interface RateLimiter {
          */
         IP,
         /**
-         * 按用户ID限流
+         * 按用户ID限流（未登录时退化为按IP限流）
          */
         USER,
         /**

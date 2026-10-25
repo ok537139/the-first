@@ -19,6 +19,7 @@ services:
       - mysql_data:/var/lib/mysql
       - ./src/main/resources/db/hmdp.sql:/docker-entrypoint-initdb.d/001-hmdp.sql:ro
       - ./src/main/resources/db/demo-data.sql:/docker-entrypoint-initdb.d/002-demo-data.sql:ro
+      - ./src/main/resources/db/upgrade-consistency.sql:/docker-entrypoint-initdb.d/003-consistency.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
       interval: 5s
@@ -30,7 +31,7 @@ services:
     image: redis:6.2-alpine
     container_name: hm-dianping-redis
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory-policy", "noeviction"]
     ports:
       - "6379:6379"
     volumes:

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { BookOpenText, Heart, MessageCircle, Plus, Reply, Search, Send, Trash2, UserPlus, Users } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { blogApi, commentApi, firstImage, followApi, mediaUrl } from '../api'
@@ -23,22 +23,32 @@ export function CommunityPage() {
       if (mode === 'hot') return blogApi.hot(current)
       if (mode === 'mine') return blogApi.mine(current)
       if (mode === 'user') return blogApi.byUser(userId, current)
-      const result = await blogApi.feed(Date.now(), 0)
-      return result?.list || []
+      return []
     },
-    enabled: mode === 'hot' || mode === 'user' || Boolean(user),
+    enabled: mode !== 'feed' && (mode === 'hot' || mode === 'user' || Boolean(user)),
   })
+  const feed = useInfiniteQuery({
+    queryKey: ['feed', user?.id],
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) => blogApi.feed(pageParam),
+    getNextPageParam: (page) => page.hasMore ? page.nextCursor : undefined,
+    enabled: mode === 'feed' && Boolean(user),
+  })
+  const visibleBlogs = mode === 'feed'
+    ? [...new Map(feed.data?.pages.flatMap((page) => page.list).map((blog) => [blog.id, blog]) || []).values()]
+    : blogs.data
+  const listLoading = mode === 'feed' ? feed.isLoading : blogs.isLoading
   const detail = useQuery({ queryKey: ['blog', selectedId], queryFn: () => blogApi.detail(selectedId!), enabled: Boolean(selectedId) })
   const likes = useQuery({ queryKey: ['blog-likes', selectedId], queryFn: () => blogApi.likes(selectedId!), enabled: Boolean(selectedId) })
   const followStatus = useQuery({ queryKey: ['follow-status', detail.data?.userId], queryFn: () => followApi.status(detail.data!.userId), enabled: Boolean(user && detail.data?.userId && user.id !== detail.data.userId) })
   const like = useMutation({
     mutationFn: blogApi.like,
-    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['blogs'] }); void queryClient.invalidateQueries({ queryKey: ['blog', selectedId] }); void queryClient.invalidateQueries({ queryKey: ['blog-likes', selectedId] }) },
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['feed'] }); void queryClient.invalidateQueries({ queryKey: ['blogs'] }); void queryClient.invalidateQueries({ queryKey: ['blog', selectedId] }); void queryClient.invalidateQueries({ queryKey: ['blog-likes', selectedId] }) },
     onError: (error) => setNotice(error.message),
   })
   const follow = useMutation({
     mutationFn: ({ id, isFollow }: { id: number; isFollow: boolean }) => followApi.set(id, isFollow),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['follow-status'] }),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['follow-status'] }); void queryClient.resetQueries({ queryKey: ['feed'] }) },
     onError: (error) => setNotice(error.message),
   })
   const title = useMemo(() => ({ hot: '城中热帖', feed: '关注动态', mine: '我的笔记', user: `用户 #${userId} 的笔记` })[mode], [mode, userId])
@@ -57,13 +67,14 @@ export function CommunityPage() {
     </div>
     {notice && <div className="notice info" onClick={() => setNotice('')}>{notice}</div>}
     <div className="section-heading"><div><p className="eyebrow">NOTEBOOK</p><h2>{title}</h2></div><span>第 {current} 页</span></div>
-    {!blogs.isFetching && !blogs.data && mode !== 'hot' && mode !== 'user' && <LoginPrompt />}
-    {blogs.isError && <div className="notice error">{blogs.error.message}</div>}
+    {!user && mode !== 'hot' && mode !== 'user' && <LoginPrompt />}
+    {mode === 'feed' && feed.isError ? <div className="notice error">{feed.error.message}</div> : blogs.isError && <div className="notice error">{blogs.error.message}</div>}
     <div className="blog-grid">
-      {blogs.isLoading && Array.from({ length: 4 }).map((_, index) => <div className="blog-card skeleton" key={index} />)}
-      {blogs.data?.map((blog) => <BlogCard blog={blog} key={blog.id} onOpen={() => setSelectedId(blog.id)} onLike={() => like.mutate(blog.id)} />)}
+      {listLoading && Array.from({ length: 4 }).map((_, index) => <div className="blog-card skeleton" key={index} />)}
+      {visibleBlogs?.map((blog) => <BlogCard blog={blog} key={blog.id} onOpen={() => setSelectedId(blog.id)} onLike={() => { if (!like.isPending) like.mutate({ id: blog.id, liked: !blog.isLike }) }} />)}
     </div>
-    {!blogs.isLoading && blogs.data?.length === 0 && <div className="empty"><BookOpenText /><h3>这里还没有笔记</h3><p>关注一些用户，或者发布第一篇内容吧。</p></div>}
+    {!listLoading && visibleBlogs?.length === 0 && <div className="empty"><BookOpenText /><h3>这里还没有笔记</h3><p>关注一些用户，或者发布第一篇内容吧。</p></div>}
+    {mode === 'feed' && user && <div className="pager"><button disabled={!feed.hasNextPage || feed.isFetchingNextPage} onClick={() => void feed.fetchNextPage()}>{feed.isFetchingNextPage ? '加载中…' : feed.hasNextPage ? '加载更多' : '没有更多了'}</button></div>}
     {(mode === 'hot' || mode === 'mine' || mode === 'user') && <div className="pager"><button disabled={current === 1} onClick={() => setCurrent((value) => Math.max(1, value - 1))}>上一页</button><span>第 {current} 页</span><button disabled={(blogs.data?.length || 0) < 10} onClick={() => setCurrent((value) => value + 1)}>下一页</button></div>}
 
     {selectedId && <Modal title="探店笔记" wide onClose={() => setSelectedId(undefined)}>
@@ -72,7 +83,7 @@ export function CommunityPage() {
         <div className="blog-detail-copy">
           <div className="author-row"><Avatar name={detail.data.name} icon={detail.data.icon} /><div><strong>{detail.data.name || `用户 ${detail.data.userId}`}</strong><small>作者 ID · {detail.data.userId}</small></div>{user && user.id !== detail.data.userId && <button className="outline-button" onClick={() => follow.mutate({ id: detail.data!.userId, isFollow: !followStatus.data })}><UserPlus size={16} />{followStatus.data ? '取消关注' : '关注'}</button>}</div>
           <p className="eyebrow">SHOP NOTE · #{detail.data.shopId}</p><h2>{detail.data.title}</h2><p className="blog-content">{detail.data.content}</p>
-          <div className="detail-actions"><button className={detail.data.isLike ? 'liked' : ''} onClick={() => like.mutate(detail.data!.id)}><Heart fill={detail.data.isLike ? 'currentColor' : 'none'} />{detail.data.liked || 0} 人喜欢</button><span><MessageCircle />{detail.data.comments || 0} 条评论</span></div>
+          <div className="detail-actions"><button className={detail.data.isLike ? 'liked' : ''} disabled={like.isPending} onClick={() => like.mutate({ id: detail.data!.id, liked: !detail.data!.isLike })}><Heart fill={detail.data.isLike ? 'currentColor' : 'none'} />{detail.data.liked || 0} 人喜欢</button><span><MessageCircle />{detail.data.comments || 0} 条评论</span></div>
           <div className="liked-by"><h4><Users size={17} />最早点赞</h4><div>{likes.data?.length ? likes.data.map((item) => <span key={item.id}><Avatar name={item.nickName} icon={item.icon} />{item.nickName}</span>) : <small>还没有人点赞，成为第一个吧</small>}</div></div>
         </div>
       </article>}
@@ -118,17 +129,17 @@ function CommentSection({ blogId }: { blogId: number }) {
     {notice && <div className="comment-notice" onClick={() => setNotice('')}>{notice}</div>}
     <div className="comment-list">
       {comments.isLoading && <p className="muted">评论加载中…</p>}
-      {comments.data?.map((comment) => <CommentItem key={comment.id} comment={comment} rootId={comment.id} currentUserId={user?.id} onReply={(item, rootId) => setReplying({ parentId: rootId, answerId: item.id, name: item.userName || `用户 ${item.userId}` })} onLike={(id) => like.mutate(id)} onDelete={requestDelete} />)}
+      {comments.data?.map((comment) => <CommentItem key={comment.id} comment={comment} rootId={comment.id} currentUserId={user?.id} onReply={(item, rootId) => setReplying({ parentId: rootId, answerId: item.id, name: item.userName || `用户 ${item.userId}` })} onLike={(id, liked) => { if (!like.isPending) like.mutate({ id, liked }) }} onDelete={requestDelete} />)}
       {!comments.isLoading && comments.data?.length === 0 && <div className="empty compact">还没有评论，来坐第一排吧</div>}
     </div>
     <div className="pager compact-pager"><button disabled={current === 1} onClick={() => setCurrent((value) => value - 1)}>上一页</button><span>第 {current} 页</span><button disabled={(comments.data?.length || 0) < 5} onClick={() => setCurrent((value) => value + 1)}>下一页</button></div>
   </section>
 }
 
-function CommentItem({ comment, rootId, currentUserId, onReply, onLike, onDelete }: { comment: BlogComment; rootId: number; currentUserId?: number; onReply: (comment: BlogComment, rootId: number) => void; onLike: (id: number) => void; onDelete: (id: number) => void }) {
+function CommentItem({ comment, rootId, currentUserId, onReply, onLike, onDelete }: { comment: BlogComment; rootId: number; currentUserId?: number; onReply: (comment: BlogComment, rootId: number) => void; onLike: (id: number, liked: boolean) => void; onDelete: (id: number) => void }) {
   return <article className={`comment-item ${comment.parentId ? 'reply-item' : ''}`}>
     <Avatar name={comment.userName} icon={comment.userIcon} />
-    <div className="comment-copy"><div className="comment-author"><strong>{comment.userName || `用户 ${comment.userId}`}</strong>{comment.answerName && <span>回复 @{comment.answerName}</span>}<time>{formatTime(comment.createTime)}</time></div><p>{comment.content}</p><div className="comment-actions"><button className={comment.isLike ? 'liked' : ''} onClick={() => onLike(comment.id)}><Heart size={14} fill={comment.isLike ? 'currentColor' : 'none'} />{comment.liked || 0}</button><button onClick={() => onReply(comment, rootId)}><Reply size={14} />回复</button>{currentUserId === comment.userId && <button onClick={() => onDelete(comment.id)}><Trash2 size={14} />删除</button>}</div>{comment.replies?.length ? <div className="reply-list">{comment.replies.map((reply) => <CommentItem key={reply.id} comment={reply} rootId={rootId} currentUserId={currentUserId} onReply={onReply} onLike={onLike} onDelete={onDelete} />)}</div> : null}</div>
+    <div className="comment-copy"><div className="comment-author"><strong>{comment.userName || `用户 ${comment.userId}`}</strong>{comment.answerName && <span>回复 @{comment.answerName}</span>}<time>{formatTime(comment.createTime)}</time></div><p>{comment.content}</p><div className="comment-actions"><button className={comment.isLike ? 'liked' : ''} onClick={() => onLike(comment.id, !comment.isLike)}><Heart size={14} fill={comment.isLike ? 'currentColor' : 'none'} />{comment.liked || 0}</button><button onClick={() => onReply(comment, rootId)}><Reply size={14} />回复</button>{currentUserId === comment.userId && <button onClick={() => onDelete(comment.id)}><Trash2 size={14} />删除</button>}</div>{comment.replies?.length ? <div className="reply-list">{comment.replies.map((reply) => <CommentItem key={reply.id} comment={reply} rootId={rootId} currentUserId={currentUserId} onReply={onReply} onLike={onLike} onDelete={onDelete} />)}</div> : null}</div>
   </article>
 }
 

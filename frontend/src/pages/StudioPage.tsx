@@ -70,10 +70,10 @@ function EndpointCoverage() {
     ['博客', '热门、详情、发布、点赞、点赞榜、我的、按用户、关注流', '社区 / 发布'],
     ['评论', '评论分页、发表、两级回复、点赞/取消、作者删除', '社区详情'],
     ['关注', '关注/取关、状态、共同关注', '社区 / 个人中心'],
-    ['优惠券', '店铺券列表、新增普通券、新增秒杀券、秒杀下单', '发现 / 管理台'],
+    ['优惠券', '店铺券列表、新增普通券、新增秒杀券、秒杀下单、下单结果查询', '发现 / 管理台'],
     ['上传', '博客图片上传与删除', '发布'],
   ]
-  return <div className="coverage-grid">{groups.map(([name, endpoints, page]) => <article className="panel" key={name}><BadgeCheck /><div><h3>{name}</h3><p>{endpoints}</p><small>入口：{page}</small></div></article>)}<div className="coverage-summary panel"><strong>35 / 35</strong><span>现有可调用接口均有前端入口</span><small>评论已经支持查询、发表、回复、点赞和删除。</small></div></div>
+  return <div className="coverage-grid">{groups.map(([name, endpoints, page]) => <article className="panel" key={name}><BadgeCheck /><div><h3>{name}</h3><p>{endpoints}</p><small>入口：{page}</small></div></article>)}<div className="coverage-summary panel"><strong>36 / 36</strong><span>现有可调用接口均有前端入口</span><small>评论已经支持查询、发表、回复、点赞和删除。</small></div></div>
 }
 
 function localDateTime(offsetDays: number) { const date = new Date(Date.now() + offsetDays * 86400000); date.setMinutes(date.getMinutes() - date.getTimezoneOffset()); return date.toISOString().slice(0, 16) }

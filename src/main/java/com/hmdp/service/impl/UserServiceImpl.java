@@ -22,6 +22,7 @@ import javax.annotation.Resource;
 import javax.servlet.http.HttpSession;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -52,13 +53,20 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
             // 2.如果不符合，返回错误信息
             return Result.fail("手机号格式错误！");
         }
-        // 3.符合，生成验证码
+        // 3.同一手机号 60 秒内只能发送一次
+        Boolean allowed = stringRedisTemplate.opsForValue()
+                .setIfAbsent(LOGIN_CODE_LIMIT_KEY + phone, "1", LOGIN_CODE_INTERVAL, TimeUnit.SECONDS);
+        if (!Boolean.TRUE.equals(allowed)) {
+            return Result.fail("验证码发送过于频繁，请稍后再试");
+        }
+        // 4.生成验证码
         String code = RandomUtil.randomNumbers(6);
 
-        // 4.保存验证码到 session
+        // 5.保存验证码到 Redis，重新发送时清零失败次数
         stringRedisTemplate.opsForValue().set(LOGIN_CODE_KEY + phone, code, LOGIN_CODE_TTL, TimeUnit.MINUTES);
+        stringRedisTemplate.delete(LOGIN_CODE_FAIL_KEY + phone);
 
-        // 5.发送验证码
+        // 6.发送验证码
         log.debug("发送短信验证码成功，验证码：{}", code);
         // 返回ok
         // 本项目用于本地教学演示，直接返回验证码，便于前后端联调。
@@ -77,9 +85,15 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         String cacheCode = stringRedisTemplate.opsForValue().get(LOGIN_CODE_KEY + phone);
         String code = loginForm.getCode();
         if (cacheCode == null || !cacheCode.equals(code)) {
-            // 不一致，报错
+            // 不一致，记录失败次数；6 位验证码只有一百万种组合，不限制次数可以被暴力枚举
+            if (cacheCode != null && recordCodeFailure(phone) >= LOGIN_CODE_MAX_FAIL) {
+                stringRedisTemplate.delete(LOGIN_CODE_KEY + phone);
+                return Result.fail("验证码错误次数过多，请重新获取");
+            }
             return Result.fail("验证码错误");
         }
+        // 验证码只能使用一次
+        stringRedisTemplate.delete(Arrays.asList(LOGIN_CODE_KEY + phone, LOGIN_CODE_FAIL_KEY + phone));
 
         // 4.一致，根据手机号查询用户 select * from tb_user where phone = ?
         User user = query().eq("phone", phone).one();
@@ -165,6 +179,18 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
             num >>>= 1;
         }
         return Result.ok(count);
+    }
+
+    /**
+     * 记录验证码校验失败次数，有效期与验证码相同
+     */
+    private long recordCodeFailure(String phone) {
+        String key = LOGIN_CODE_FAIL_KEY + phone;
+        Long count = stringRedisTemplate.opsForValue().increment(key);
+        if (count != null && count == 1) {
+            stringRedisTemplate.expire(key, LOGIN_CODE_TTL, TimeUnit.MINUTES);
+        }
+        return count == null ? 0 : count;
     }
 
     private User createUserWithPhone(String phone) {

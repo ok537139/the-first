@@ -3,6 +3,7 @@ import type {
   Blog,
   BlogComment,
   ScrollResult,
+  SeckillResult,
   Shop,
   ShopPayload,
   ShopType,
@@ -21,7 +22,11 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
   if (init?.body && !(init.body instanceof FormData)) headers.set('Content-Type', 'application/json')
   const response = await fetch(`${API_PREFIX}${path}`, { ...init, headers })
   if (response.status === 401) throw new Error('请先登录后再操作')
+  if (!response.headers.get('content-type')?.includes('application/json')) {
+    throw new Error(response.ok ? '服务器返回格式异常，请稍后重试' : `请求失败（HTTP ${response.status}），请检查服务配置或稍后重试`)
+  }
   const result = (await response.json()) as ApiResult<T>
+  if (!response.ok) throw new Error(result.errorMsg || `请求失败（HTTP ${response.status}）`)
   if (!result.success) throw new Error(result.errorMsg || '操作失败')
   return result.data
 }
@@ -55,16 +60,16 @@ export const blogApi = {
   likes: (id: number) => apiRequest<User[]>(`/blog/likes/${id}`),
   mine: (current = 1) => apiRequest<Blog[]>(`/blog/of/me?current=${current}`),
   byUser: (id: number, current = 1) => apiRequest<Blog[]>(`/blog/of/user?id=${id}&current=${current}`),
-  feed: (lastId: number, offset = 0) => apiRequest<ScrollResult<Blog> | undefined>(`/blog/of/follow?lastId=${lastId}&offset=${offset}`),
+  feed: (cursor?: string) => apiRequest<ScrollResult<Blog>>('/blog/of/follow' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : '')),
   create: (blog: Partial<Blog>) => apiRequest<number>('/blog', { method: 'POST', body: JSON.stringify(blog) }),
-  like: (id: number) => apiRequest<void>(`/blog/like/${id}`, { method: 'PUT' }),
+  like: ({ id, liked }: { id: number; liked: boolean }) => apiRequest<{ liked: number; isLike: boolean }>('/blog/like/' + id + '?liked=' + liked, { method: 'PUT' }),
 }
 
 export const commentApi = {
   list: (blogId: number, current = 1) => apiRequest<BlogComment[]>(`/blog-comments/list?blogId=${blogId}&current=${current}`),
   create: (payload: { blogId: number; content: string; parentId?: number; answerId?: number }) =>
     apiRequest<number>('/blog-comments', { method: 'POST', body: JSON.stringify(payload) }),
-  like: (id: number) => apiRequest<void>(`/blog-comments/like/${id}`, { method: 'PUT' }),
+  like: ({ id, liked }: { id: number; liked: boolean }) => apiRequest<{ liked: number; isLike: boolean }>('/blog-comments/like/' + id + '?liked=' + liked, { method: 'PUT' }),
   remove: (id: number) => apiRequest<void>(`/blog-comments/${id}`, { method: 'DELETE' }),
 }
 
@@ -88,7 +93,8 @@ export const adminApi = {
   updateShop: (shop: ShopPayload) => apiRequest<void>('/shop', { method: 'PUT', body: JSON.stringify(shop) }),
   addVoucher: (voucher: VoucherPayload) => apiRequest<number>('/voucher', { method: 'POST', body: JSON.stringify(voucher) }),
   addSeckillVoucher: (voucher: VoucherPayload) => apiRequest<number>('/voucher/seckill', { method: 'POST', body: JSON.stringify(voucher) }),
-  seckill: (voucherId: number) => apiRequest<number>(`/voucher-order/seckill/${voucherId}`, { method: 'POST' }),
+  seckill: (voucherId: number) => apiRequest<string>(`/voucher-order/seckill/${voucherId}`, { method: 'POST' }),
+  seckillResult: (voucherId: number) => apiRequest<SeckillResult>(`/voucher-order/seckill/${voucherId}/result`),
 }
 
 export function mediaUrl(path?: string) {

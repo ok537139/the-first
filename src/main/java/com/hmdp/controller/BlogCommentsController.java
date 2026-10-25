@@ -33,8 +33,8 @@ public class BlogCommentsController {
     }
 
     @PutMapping("/like/{id}")
-    public Result likeComment(@PathVariable("id") Long id) {
-        return commentsService.likeComment(id);
+    public Result likeComment(@PathVariable("id") Long id, @RequestParam("liked") Boolean liked) {
+        return commentsService.likeComment(id, liked);
     }
 
     @DeleteMapping("/{id}")

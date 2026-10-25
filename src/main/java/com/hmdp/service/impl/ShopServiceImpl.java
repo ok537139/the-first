@@ -7,8 +7,12 @@ import com.hmdp.dto.Result;
 import com.hmdp.entity.Shop;
 import com.hmdp.mapper.ShopMapper;
 import com.hmdp.service.IShopService;
+import com.hmdp.service.cache.ShopBloomFilter;
+import com.hmdp.service.consistency.ShopCacheSyncService;
+import org.springframework.dao.DataAccessException;
 import com.hmdp.utils.CacheClient;
 import com.hmdp.utils.SystemConstants;
+import com.hmdp.utils.TransactionUtils;
 import org.springframework.data.geo.Distance;
 import org.springframework.data.geo.GeoResult;
 import org.springframework.data.geo.GeoResults;
@@ -42,17 +46,31 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     @Resource
     private CacheClient cacheClient;
 
+    @Resource
+    private ShopBloomFilter shopBloomFilter;
+
+    @Resource
+    private ShopCacheSyncService cacheSync;
+
     @Override
     public Result queryById(Long id) {
-        // 解决缓存穿透
-        Shop shop = cacheClient
-                .queryWithPassThrough(CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
+        // 布隆过滤器判断一定不存在的 id 直接返回，不访问 Redis 和 MySQL；误判的少量请求由缓存空值兜底
+        if (!shopBloomFilter.mightContain(id)) {
+            return Result.fail("店铺不存在！");
+        }
+        // 缓存空值防穿透 + 互斥锁防击穿
+        Shop shop;
+        try {
+            shop = cacheClient.queryWithMutex(CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
+        } catch (DataAccessException e) {
+            shop = getById(id);
+        }
 
-        // 互斥锁解决缓存击穿
+        // 只防穿透（不防击穿）
         // Shop shop = cacheClient
-        //         .queryWithMutex(CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
+        //         .queryWithPassThrough(CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
 
-        // 逻辑过期解决缓存击穿
+        // 逻辑过期解决缓存击穿（需要提前预热，缓存格式为 RedisData）
         // Shop shop = cacheClient
         //         .queryWithLogicalExpire(CACHE_SHOP_KEY, id, Shop.class, this::getById, 20L, TimeUnit.SECONDS);
 
@@ -65,15 +83,34 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
     @Override
     @Transactional
+    public Result saveShop(Shop shop) {
+        if (!validCoordinates(shop)) return Result.fail("店铺坐标超出有效范围");
+        shop.setId(null);
+        save(shop);
+        // id 是自增的，插入后才能拿到。在事务提交前加入布隆过滤器：
+        // 事务回滚只会在过滤器里多一个不存在的 id（多一次误判，缓存空值兜底）；
+        // 提交后再加的话，提交到加入之间的查询会把真实存在的店铺判成不存在
+        shopBloomFilter.add(shop.getId());
+        cacheSync.markPending(shop.getId());
+        TransactionUtils.afterCommit(() -> cacheSync.trySync(shop.getId()));
+        return Result.ok(shop.getId());
+    }
+
+    @Override
+    @Transactional
     public Result update(Shop shop) {
         Long id = shop.getId();
         if (id == null) {
             return Result.fail("店铺id不能为空");
         }
+        if (!validCoordinates(shop)) return Result.fail("店铺坐标超出有效范围");
+        Shop existing = query().eq("id", id).last("FOR UPDATE").one();
+        if (existing == null) return Result.fail("店铺不存在");
         // 1.更新数据库
         updateById(shop);
-        // 2.删除缓存
-        stringRedisTemplate.delete(CACHE_SHOP_KEY + id);
+        cacheSync.markPending(id);
+        // 2.事务提交后再删除缓存：提交前删除的话，期间的读请求会读到旧数据并写回缓存
+        TransactionUtils.afterCommit(() -> cacheSync.trySync(id));
         return Result.ok();
     }
 
@@ -100,7 +137,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
                         key,
                         GeoReference.fromCoordinate(x, y),
                         new Distance(5000),
-                        RedisGeoCommands.GeoSearchCommandArgs.newGeoSearchArgs().includeDistance().limit(end)
+                        RedisGeoCommands.GeoSearchCommandArgs.newGeoSearchArgs().includeDistance().sortAscending().limit(end)
                 );
         // 4.解析出id
         if (results == null) {
@@ -130,5 +167,10 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         }
         // 6.返回
         return Result.ok(shops);
+    }
+
+    private boolean validCoordinates(Shop shop) {
+        return (shop.getX() == null || (Double.isFinite(shop.getX()) && Math.abs(shop.getX()) <= 180))
+                && (shop.getY() == null || (Double.isFinite(shop.getY()) && Math.abs(shop.getY()) <= 85.05112878));
     }
 }
