@@ -39,3 +39,4 @@ redis.call('sadd', KEYS[2], ARGV[1])
 -- 原 Redis Stream 方案在这里 XADD 发消息，现改为 Java 中发送 Kafka 消息
 -- redis.call('xadd', 'stream.orders', '*', 'userId', userId, 'voucherId', voucherId, 'id', orderId)
 return 0
+
