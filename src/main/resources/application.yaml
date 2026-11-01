@@ -1,0 +1,87 @@
+server:
+  port: 8081
+spring:
+  task:
+    scheduling:
+      pool:
+        size: 4
+  application:
+    name: hmdp
+  datasource:
+    driver-class-name: com.mysql.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/hmdp?useSSL=false&serverTimezone=UTC&tinyInt1isBit=false&allowPublicKeyRetrieval=true&useSSL=false
+    username: root
+    password: 123456
+  redis:
+    timeout: 2s
+    host: localhost
+    port: 6379
+    lettuce:
+      pool:
+        max-active: 10
+        max-idle: 10
+        min-idle: 1
+        time-between-eviction-runs: 10s
+  jackson:
+    default-property-inclusion: non_null # JSON处理时忽略非空字段
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      # 所有同步副本写入成功才确认；开启幂等，重试不会产生重复消息（kafka-clients 2.6 默认 acks=1、不开幂等）
+      acks: all
+      retries: 3
+      properties:
+        enable:
+          idempotence: true
+    consumer:
+      group-id: hm-dianping-seckill
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # 反序列化失败时不在 poll 阶段抛异常（否则会反复拉取同一条坏消息），而是交给错误处理器转入死信
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        spring:
+          deserializer:
+            value:
+              delegate:
+                class: org.springframework.kafka.support.serializer.JsonDeserializer
+          json:
+            trusted:
+              packages: com.hmdp.entity
+
+mybatis-plus:
+  type-aliases-package: com.hmdp.entity # 别名扫描包
+
+
+logging:
+  level:
+    com.hmdp: debug
+  pattern:
+    dateformat: mm:ss.SSS
+
+# 【秒杀优惠券信息多级缓存改造】本地缓存的配置项(刷新时间、过期时间)、Redis缓存的过期时间
+hmdp:
+  consistency:
+    double-delete-delay-ms: 1000
+    retry-seconds: 5
+    batch-size: 100
+    fanout-batch-size: 500
+    big-author-threshold: 10000
+    feed-max-size: 1000
+    follow-backfill-size: 20
+    feed-page-size: 10
+    cache-seconds: 600
+  bloom:
+    shop:
+      rebuild-cron: "0 0 4 * * ?"  # 店铺布隆过滤器定时全量重建，选在低峰期
+  kafka:
+    seckill:
+      partitions: 3   # 秒杀订单 topic 分区数，决定消费并行度上限
+      concurrency: 3  # 消费线程数，不超过分区数
+  cache:
+    voucher-list:
+      mode: caffeine
+      refresh-after-write: 5s
+      expire-after-write: 10m
+      redis-ttl: 30m
