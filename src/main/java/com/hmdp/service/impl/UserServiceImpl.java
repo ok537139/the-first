@@ -47,18 +47,25 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
     private StringRedisTemplate stringRedisTemplate;
 
     @Override
-    public Result sendCode(String phone, HttpSession session) {
+    public Result sendCode(String phone) {
         // 1.校验手机号
         if (RegexUtils.isPhoneInvalid(phone)) {
             // 2.如果不符合，返回错误信息
             return Result.fail("手机号格式错误！");
         }
+
+
         // 3.同一手机号 60 秒内只能发送一次
         Boolean allowed = stringRedisTemplate.opsForValue()
                 .setIfAbsent(LOGIN_CODE_LIMIT_KEY + phone, "1", LOGIN_CODE_INTERVAL, TimeUnit.SECONDS);
+
+
+
         if (!Boolean.TRUE.equals(allowed)) {
             return Result.fail("验证码发送过于频繁，请稍后再试");
         }
+
+
         // 4.生成验证码
         String code = RandomUtil.randomNumbers(6);
 
@@ -74,13 +81,15 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
     }
 
     @Override
-    public Result login(LoginFormDTO loginForm, HttpSession session) {
+    public Result login(LoginFormDTO loginForm) {
         // 1.校验手机号
         String phone = loginForm.getPhone();
         if (RegexUtils.isPhoneInvalid(phone)) {
             // 2.如果不符合，返回错误信息
             return Result.fail("手机号格式错误！");
         }
+
+
         // 3.从redis获取验证码并校验
         String cacheCode = stringRedisTemplate.opsForValue().get(LOGIN_CODE_KEY + phone);
         String code = loginForm.getCode();
@@ -92,8 +101,9 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
             }
             return Result.fail("验证码错误");
         }
-        // 验证码只能使用一次
+        // 验证码只能使用一次，删除验证码
         stringRedisTemplate.delete(Arrays.asList(LOGIN_CODE_KEY + phone, LOGIN_CODE_FAIL_KEY + phone));
+
 
         // 4.一致，根据手机号查询用户 select * from tb_user where phone = ?
         User user = query().eq("phone", phone).one();
